@@ -415,10 +415,8 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   while(got_null == 0 && max > 0){
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0){
-      if((pa0 = vmfault(pagetable, va0, 1)) == 0)
-        return -1;
-    }
+    if(pa0 == 0)
+      return -1;
     n = PGSIZE - (srcva - va0);
     if(n > max)
       n = max;
@@ -457,79 +455,17 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
   uint64 mem;
   struct proc *p = myproc();
 
-  // Invalid address beyond heap and outside stack window
-  uint64 sp_user = p->trapframe ? p->trapframe->sp : 0;
-  int within_stack = (va >= PGROUNDDOWN(sp_user - PGSIZE) && va < PGROUNDDOWN(sp_user) + PGSIZE*USERSTACK);
-  if (va >= MAXVA)
+  if (va >= p->sz)
     return 0;
-  if (va >= p->sz && !within_stack)
-    return 0;
-
   va = PGROUNDDOWN(va);
   if(ismapped(pagetable, va)) {
     return 0;
   }
-
-  // Try to see if fault belongs to an exec segment for lazy LOADEXEC
-  int is_exec = 0;
-  int exec_perm = PTE_R;
-  uint load_off = 0;
-  if(p->exec_ip){
-    for(int i=0;i<p->exec_phnum;i++){
-      struct proghdr *ph = &p->exec_ph[i];
-      if(ph->type != ELF_PROG_LOAD) continue;
-      if(va >= ph->vaddr && va < ph->vaddr + ph->memsz){
-        is_exec = 1;
-        exec_perm = PTE_U | PTE_R | flags2perm(ph->flags);
-        load_off = ph->off + (va - ph->vaddr);
-        break;
-      }
-    }
-  }
-
   mem = (uint64) kalloc();
   if(mem == 0)
     return 0;
   memset((void *) mem, 0, PGSIZE);
-
-  if(is_exec){
-    // Load from executable file the bytes that belong to this page
-    ilock(p->exec_ip);
-    // compute how many bytes in this page to read from file
-    // ensure not to read past segment filesz
-    uint64 filesz = 0;
-    for(int i=0;i<p->exec_phnum;i++){
-      struct proghdr *ph = &p->exec_ph[i];
-      if(ph->type != ELF_PROG_LOAD) continue;
-      if(va >= ph->vaddr && va < ph->vaddr + ph->memsz){
-        uint64 page_end = va + PGSIZE;
-        uint64 seg_end = ph->vaddr + ph->filesz;
-        if(va >= seg_end){
-          filesz = 0;
-        } else {
-          filesz = (page_end <= seg_end) ? PGSIZE : (seg_end - va);
-        }
-        break;
-      }
-    }
-    if(filesz > 0){
-      if(readi(p->exec_ip, 0, mem, load_off, filesz) != filesz){
-        iunlock(p->exec_ip);
-        kfree((void*)mem);
-        return 0;
-      }
-    }
-    iunlock(p->exec_ip);
-    if (mappages(p->pagetable, va, PGSIZE, mem, exec_perm) != 0) {
-      kfree((void *)mem);
-      return 0;
-    }
-    return mem;
-  }
-
-  // Heap or stack: zero page with RW permissions
-  int perm = PTE_U | PTE_R | PTE_W;
-  if (mappages(p->pagetable, va, PGSIZE, mem, perm) != 0) {
+  if (mappages(p->pagetable, va, PGSIZE, mem, PTE_W|PTE_U|PTE_R) != 0) {
     kfree((void *)mem);
     return 0;
   }
